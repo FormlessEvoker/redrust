@@ -1,21 +1,27 @@
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use std::collections::HashMap;
 use std::error::Error;
-use std::io::{self, Read};
-use std::net::{TcpListener, TcpStream};
+use std::io;
+use std::net::TcpListener;
 use std::os::fd::{AsFd, AsRawFd, RawFd};
 
 mod config;
 mod conn;
 
+use crate::conn::Conn;
+
 fn main() -> Result<(), Box<dyn Error>> {
     let cfg = config::load_env()?;
     let addr = format!("0.0.0.0:{}", cfg.port);
 
-    let mut fd2conn: HashMap<RawFd, conn::Conn> = HashMap::new();
+    // Map file descriptors to Conn
+    let mut fd2conn: HashMap<RawFd, Conn> = HashMap::new();
 
+    // Start our TCP listener socket
     let listener: TcpListener = TcpListener::bind(&addr).unwrap();
+    listener.set_nonblocking(true).unwrap();
 
+    // Central Event Loop
     loop {
         // 1. Build poll_args from fd2conn
         let mut poll_args = build_poll_args(&listener, &fd2conn);
@@ -56,11 +62,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 if revents.contains(PollFlags::POLLIN) {
                     match conn.try_read() {
-                        Ok(0) if !conn.want_read => {
-                            // Peer closed the connection
+                        Ok(0) => {
+                            // Peer closed the connection cleanly (EOF)
                             close_connection = true;
                         }
                         Ok(_) => {}
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                            // False alarm from OS, ignore
+                        }
                         Err(e) => {
                             eprintln!("Read error on fd {}: {}", fd, e);
                             close_connection = true;
@@ -71,6 +80,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 if !close_connection && revents.contains(PollFlags::POLLOUT) {
                     match conn.try_write() {
                         Ok(_) => {}
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                            // Kernel buffer full, ignore
+                        }
                         Err(e) => {
                             eprintln!("Write error on fd {}: {}", fd, e);
                             close_connection = true;
@@ -97,9 +109,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
+// Given the listener and the connection map,
+// build a list of poll file descriptors, which are the fds which we are listening
+// to OS events for
 fn build_poll_args<'sock>(
     listener: &'sock TcpListener,
-    fd2conn: &'sock HashMap<RawFd, conn::Conn>,
+    fd2conn: &'sock HashMap<RawFd, Conn>,
 ) -> Vec<PollFd<'sock>> {
     let mut poll_args: Vec<PollFd<'sock>> = Vec::new();
 
@@ -123,7 +138,7 @@ fn build_poll_args<'sock>(
     poll_args
 }
 
-fn accept_new_clients(listener: &TcpListener, fd2conn: &mut HashMap<RawFd, conn::Conn>) {
+fn accept_new_clients(listener: &TcpListener, fd2conn: &mut HashMap<RawFd, Conn>) {
     loop {
         match listener.accept() {
             Ok((stream, _addr)) => {
@@ -131,7 +146,7 @@ fn accept_new_clients(listener: &TcpListener, fd2conn: &mut HashMap<RawFd, conn:
                 stream.set_nonblocking(true).unwrap();
 
                 let fd = stream.as_raw_fd();
-                fd2conn.insert(fd, conn::Conn::new(stream));
+                fd2conn.insert(fd, Conn::new(stream));
                 println!("New client connected! (fd: {})", fd);
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {

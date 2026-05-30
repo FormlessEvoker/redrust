@@ -39,7 +39,6 @@ impl Conn {
                 self.want_write = true;
                 Ok(n)
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(0),
             Err(e) => Err(e),
         }
     }
@@ -60,8 +59,105 @@ impl Conn {
                 }
                 Ok(n)
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(0),
             Err(e) => Err(e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+
+    fn setup_test_connection() -> (Conn, TcpStream) {
+        // Bind to a random port on localhost
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Connect a client socket
+        let client_stream = TcpStream::connect(addr).unwrap();
+        // Accept the connection on the server side
+        let (server_stream, _) = listener.accept().unwrap();
+
+        // Make the server stream non-blocking just like the real app
+        server_stream.set_nonblocking(true).unwrap();
+        client_stream.set_nonblocking(false).unwrap(); // Client can block to make tests easier
+
+        (Conn::new(server_stream), client_stream)
+    }
+
+    #[test]
+    fn test_conn_initial_state() {
+        let (conn, _) = setup_test_connection();
+        assert!(conn.want_read);
+        assert!(!conn.want_write);
+        assert!(conn.incoming.is_empty());
+        assert!(conn.outgoing.is_empty());
+    }
+
+    fn wait_for_read(conn: &mut Conn) -> usize {
+        loop {
+            match conn.try_read() {
+                Ok(n) => return n,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(e) => panic!("Unexpected read error: {}", e),
+            }
+        }
+    }
+
+    #[test]
+    fn test_try_read_would_block() {
+        let (mut conn, _) = setup_test_connection();
+
+        // Client hasn't sent anything, try_read should return a WouldBlock error
+        let err = conn.try_read().unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn test_try_read_and_echo() {
+        let (mut conn, mut client) = setup_test_connection();
+
+        // Client writes data to server
+        client.write_all(b"ping").unwrap();
+
+        // Server reads it without blocking
+        let n = wait_for_read(&mut conn);
+        assert_eq!(n, 4);
+        assert_eq!(conn.incoming, b"ping");
+        assert_eq!(conn.outgoing, b"ping"); // Echo server logic
+
+        // Intent flags should flip to allow write polling
+        assert!(!conn.want_read);
+        assert!(conn.want_write);
+
+        // Server flushed write buffer to client
+        let n = conn.try_write().unwrap();
+        assert_eq!(n, 4);
+        assert!(conn.outgoing.is_empty());
+
+        // Intent flags flip back
+        assert!(conn.want_read);
+        assert!(!conn.want_write);
+
+        // Verify client received the echo
+        let mut buf = [0u8; 4];
+        client.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"ping");
+    }
+
+    #[test]
+    fn test_try_read_eof() {
+        let (mut conn, client) = setup_test_connection();
+
+        // Dropping the client drops the socket (sends EOF/FIN to the server)
+        drop(client);
+
+        // try_read should cleanly return Ok(0)
+        let n = wait_for_read(&mut conn);
+        assert_eq!(n, 0);
     }
 }
