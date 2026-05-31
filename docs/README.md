@@ -5,6 +5,8 @@ Welcome to the RedRust documentation! Here we explain everything from foundation
 ## 📖 Foundations
 High-level network, OS, and Rust concepts.
 - [Connection Lifecycle & Core Concepts](foundations/connection_lifecycle.md): Explains sockets, file descriptors, `TcpStream`, and how they map together.
+- [Kernel Socket Mechanics & Polling](foundations/kernel_socket_mechanics.md): Deep dive into kernel receive/send buffers, hardware interrupts, how `poll()` actually works, and the anatomy of a TCP EOF.
+- [TCP State Machine](foundations/tcp_state_machine.md): Visual map of the connection lifecycle states (`LISTEN`, `ESTABLISHED`, `TIME_WAIT`, etc.) and what they mean.
 
 ## ⚙️ Implementation
 Details on the specific architectural choices in RedRust.
