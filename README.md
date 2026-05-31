@@ -1,6 +1,6 @@
 # redrust
 
-An implementation of Redis following the book "Build Your Own Redis" (print and online at https://build-your-own.org/redis/).
+An implementation of a Redis clone following the book "Build Your Own Redis" (print and online at https://build-your-own.org/redis/).
 
 This project is a personal learning exercise to implement the ideas from the book in Rust — to force a deeper understanding of the systems concepts rather than simply translating examples. The primary learning goals are low-level TCP socket programming, building an event loop, and implementing a simple key-value cache.
 
