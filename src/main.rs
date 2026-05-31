@@ -111,7 +111,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 // Given the listener and the connection map,
 // build a list of poll file descriptors, which are the fds which we are listening
-// to OS events for
+// to OS events for sockets that
 fn build_poll_args<'sock>(
     listener: &'sock TcpListener,
     fd2conn: &'sock HashMap<RawFd, Conn>,
