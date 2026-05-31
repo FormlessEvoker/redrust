@@ -5,4 +5,4 @@ edition = "2024"
 
 [dependencies]
 dotenvy = "0.15.7"
-nix = { version = "0.31.3", features = ["poll"] }
+nix = { version = "0.31.3", features = ["poll", "socket"] }
