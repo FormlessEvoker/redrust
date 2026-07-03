@@ -119,16 +119,34 @@ fn accept_new_clients(listener: &TcpListener, fd2conn: &mut HashMap<RawFd, Conn>
     }
 }
 
+// Stands for REvent action
+// as in an action to take for specific REvent...
+// or our "reaction" to it... lol
+enum PostIOState {
+    KeepAlive,
+    Close,
+}
+
 fn react_to_clients(ready_clients: Vec<(RawFd, PollFlags)>, fd2conn: &mut HashMap<RawFd, Conn>) {
     for (fd, revents) in ready_clients {
-        if revents.contains(PollFlags::POLLIN) && should_close_after_read(fd, fd2conn) {
-            close(fd, fd2conn);
-            continue;
+        if revents.contains(PollFlags::POLLIN) {
+            match try_read(fd, fd2conn) {
+                PostIOState::Close => {
+                    close(fd, fd2conn);
+                    continue;
+                }
+                PostIOState::KeepAlive => {}
+            }
         }
 
-        if revents.contains(PollFlags::POLLOUT) && should_close_after_write(fd, fd2conn) {
-            close(fd, fd2conn);
-            continue;
+        if revents.contains(PollFlags::POLLOUT) {
+            match try_write(fd, fd2conn) {
+                PostIOState::Close => {
+                    close(fd, fd2conn);
+                    continue;
+                }
+                PostIOState::KeepAlive => {}
+            }
         }
 
         if revents.intersects(PollFlags::POLLERR | PollFlags::POLLHUP) {
@@ -137,32 +155,32 @@ fn react_to_clients(ready_clients: Vec<(RawFd, PollFlags)>, fd2conn: &mut HashMa
     }
 }
 
-fn should_close_after_read(fd: i32, fd2conn: &mut HashMap<RawFd, Conn>) -> bool {
+fn try_read(fd: i32, fd2conn: &mut HashMap<RawFd, Conn>) -> PostIOState {
     match fd2conn.get_mut(&fd) {
         Some(conn) => match conn.try_read() {
-            Ok(0) => true,
-            Ok(_) => false,
-            Err(e) if e.kind() != io::ErrorKind::WouldBlock => false,
+            Ok(0) => PostIOState::Close,
+            Ok(_) => PostIOState::KeepAlive,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => PostIOState::KeepAlive,
             Err(e) => {
                 eprintln!("Read error on fd {}: {}", fd, e);
-                true
+                PostIOState::Close
             }
         },
-        None => false,
+        None => PostIOState::KeepAlive,
     }
 }
 
-fn should_close_after_write(fd: i32, fd2conn: &mut HashMap<RawFd, Conn>) -> bool {
+fn try_write(fd: i32, fd2conn: &mut HashMap<RawFd, Conn>) -> PostIOState {
     match fd2conn.get_mut(&fd) {
         Some(conn) => match conn.try_write() {
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => false,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => PostIOState::KeepAlive,
             Err(e) => {
                 eprintln!("Write error on fd {}: {}", fd, e);
-                true
+                PostIOState::Close
             }
-            _ => false,
+            _ => PostIOState::KeepAlive,
         },
-        None => false,
+        None => PostIOState::KeepAlive,
     }
 }
 
