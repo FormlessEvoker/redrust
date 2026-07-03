@@ -1,29 +1,28 @@
 # Poll Flags: The Event Loop Vocabulary
 
-**Status:** Active  
-**Audience:** Contributors building the event loop or working with `nix::poll`.  
-**Overview:** Explains the I/O event flags used by the `poll()` system call to monitor state changes on file descriptors.
-
----
-
 ## Part 1: The Core Picture
 
 ### What are Poll Flags?
+
 When we use the `poll()` system call to wait for events on multiple sockets simultaneously, we communicate with the kernel using "poll flags" (represented in Rust via `nix::poll::PollFlags`). 
 
 These flags act as a bi-directional vocabulary consisting of:
+
 1. **Input Flags (`events`):** What we *ask* the kernel to monitor (e.g., "Tell me when I can read").
 2. **Output Flags (`revents`):** What the kernel *responds* with (e.g., "You can read now," or "The connection died").
 
 ### The Two Main Actors: `POLLIN` and `POLLOUT`
+
 In standard TCP server programming, we orchestrate I/O primarily using two basic input flags. We bitwise `OR` these flags together to build our request to the kernel.
 
 #### 1. `POLLIN` (Poll In)
+
 * **Meaning:** The socket has data available to read without blocking.
 * **When to request it:** Set this when your `Conn` wrapper has `want_read = true` (which is almost always for an established connection).
 * **Special Case:** On a *listening* socket (the one bound to a port, waiting for clients), `POLLIN` means a new client connection is ready to be accepted via the `accept()` system call.
 
 #### 2. `POLLOUT` (Poll Out)
+
 * **Meaning:** The socket is ready to accept writes without blocking. The kernel's send buffer has enough free space limit (specifically, more than the `SO_SNDLOWAT` watermark).
 * **When to request it:** Set this when your `Conn` has `want_write = true` (i.e., you have buffered data ready to send back to the client).
 
@@ -41,6 +40,7 @@ graph TD
 ## Part 2: Deep Dive Details
 
 ### Anatomy of `revents` and the `pollfd` Struct
+
 When we talk about "output flags," they are technically returned in a field called **`revents`** (Returned Events or Received Events).
 
 Under the hood, when you call `poll()`, you pass the kernel an array of structs (one for each connection). In C, this struct looks exactly like this:
@@ -53,7 +53,8 @@ struct pollfd {
 };
 ```
 
-> **Why 16-bit (`short`) instead of 8-bit (`char`)?** 
+> **Why 16-bit (`short`) instead of 8-bit (`char`)?**
+>
 > 1. Even though the main TCP flags seemingly fit in 6 bits, POSIX and Linux define many esoteric extended flags (like `POLLRDHUP` or `POLLRDBAND`) that require the extra bits.
 > 2. CPU *alignment*. Notice that 4 bytes + 2 bytes + 2 bytes = 8 bytes. The struct fits perfectly into an 8-byte aligned word. Using a 1-byte flag would just force the C compiler to secretly waste space padding it to match CPU alignments anyway!
 
@@ -85,6 +86,7 @@ for poll_fd in fds.iter() {
 ```
 
 ### The Bitmasking Mechanic
+
 These flags behave exactly like Unix file permissions (`chmod 755` mapping to `rwxr-xr-x`). The `events` and `revents` fields are 16-bit integers (`short` in C, `i16` in Rust), and each flag is a constant representing a single bit set to `1`:
 
 ```c
@@ -97,7 +99,9 @@ These flags behave exactly like Unix file permissions (`chmod 755` mapping to `r
 ```
 
 #### Bitwise OR (`|`) to Request Flags
+
 When preparing our request, we use the bitwise OR operator to merge distinct bits into a single integer package for the kernel:
+
 ```text
     0000 0000 0000 0001  (POLLIN)
 |   0000 0000 0000 0100  (POLLOUT)
@@ -106,7 +110,9 @@ When preparing our request, we use the bitwise OR operator to merge distinct bit
 ```
 
 #### Bitwise AND (`&`) to Read Results
+
 When the kernel returns the `revents` integer, functions like `.contains()` or `.intersects()` in Rust's `nix` crate use a bitwise AND to check if a specific bit is turned on:
+
 ```rust
 // How `revents.contains(POLLIN)` works internally:
 if (revents & POLLIN) != 0 {
@@ -118,21 +124,26 @@ if (revents & POLLIN) != 0 {
 ```
 
 ### The Uninvited Flags (Output-Only)
+
 Even if you only specifically ask the kernel for `POLLIN` or `POLLOUT`, it can unconditionally return status flags in the output `revents` to notify you of connection state changes. You must actively check for these during the event loop dispatch phase.
 
 #### `POLLHUP` (Poll Hang-Up)
-* **Meaning:** The peer has gracefully closed their side of the connection (they sent a TCP `FIN` packet). 
+
+* **Meaning:** The peer has gracefully closed their side of the connection (they sent a TCP `FIN` packet).
 * **Action:** You can still safely read any remaining data that was in flight before the `FIN` arrived. Once your `read()` call returns `0` (the standard EOF signal), you should close your side of the socket.
 
 #### `POLLERR` (Poll Error)
+
 * **Meaning:** An asynchronous error occurred on the socket. Often this means a TCP `RST` (Reset) packet was received, abruptly dropping the connection, or a network timeout occurred.
 * **Action:** The socket is dead. Close the file descriptor and clean up associated memory immediately.
 
 #### `POLLNVAL` (Poll Invalid)
+
 * **Meaning:** The file descriptor given to `poll()` is not open (or is completely invalid).
-* **Action:** This indicates a logic bug in the event loop code (e.g., you dropped a connection and closed its socket, but forgot to remove its fd from the `poll` active list). 
+* **Action:** This indicates a logic bug in the event loop code (e.g., you dropped a connection and closed its socket, but forgot to remove its fd from the `poll` active list).
 
 ### Putting It Together: The Event Loop Mapping
+
 In RedRust, mapping `Conn` intent through `poll` to execution looks like this:
 
 ```rust

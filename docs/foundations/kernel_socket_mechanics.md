@@ -1,10 +1,7 @@
 # Kernel Socket Mechanics, Buffers, and Polling
 
-**Audience**: Learners exploring systems programming and TCP/IP mechanics.
-**Prerequisites**: Familiarity with file descriptors and the basics of a TCP connection.
-**Status**: Reviewed
-
 ## Overview
+
 When you interact with a TCP socket in applications, you are exchanging data with kernel-level subsystems. This document explains what exactly resides in the kernel, how data physically moves from application buffers to the wire, and how the OS becomes "aware" of data so that it can wake up a polling application.
 
 ---
@@ -12,6 +9,7 @@ When you interact with a TCP socket in applications, you are exchanging data wit
 ## Part 1: The Core Picture
 
 ### 1. The Kernel Socket
+
 A connected TCP socket already strictly maps to a single local IP/port and a remote IP/port. The kernel doesn't need to append target addresses to every byte of data you send; the socket struct *implies* the route. 
 
 Alongside tracking the connection lifecycle (e.g., `ESTABLISHED`, `CLOSE_WAIT`), the OS maintains two distinct memory buffers for every TCP connection:

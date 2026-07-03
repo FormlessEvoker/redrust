@@ -53,13 +53,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             })
             .collect();
 
+        // We are now done with poll_args, we can drop the reference
         drop(poll_args);
 
+        // listener has one or more clients ready to be accepted
+        // register them
         if listener_ready {
             accept_new_clients(&listener, &mut fd2conn);
         }
 
-        process_ready_clients(ready_clients, &mut fd2conn);
+        // process the clients which are already
+        react_to_clients(ready_clients, &mut fd2conn);
     }
 }
 
@@ -115,72 +119,78 @@ fn accept_new_clients(listener: &TcpListener, fd2conn: &mut HashMap<RawFd, Conn>
     }
 }
 
-fn process_ready_clients(
-    ready_clients: Vec<(RawFd, PollFlags)>,
-    fd2conn: &mut HashMap<RawFd, Conn>,
-) {
-    let mut disconnected_clients = Vec::new();
+// Stands for REvent action
+// as in an action to take for specific REvent...
+// or our "reaction" to it... lol
+enum REAction {
+    TryRead,
+    TryWrite,
+    Close,
+}
 
-    for (fd, revents) in ready_clients {
-        if let Some(conn) = fd2conn.get_mut(&fd) {
-            let mut close_connection = false;
-
-            // For each revent:
-            //  - if POLLIN, try to read
-            //    - if EOF, close
-            //    - if WouldBlock, ignore
-            //    - if Error, report and close
-            //    - otherwise, continue
-            //  - if POLLOUT, and not need to close, try to write
-            //    - if WouldBlock, ignore
-            //    - if Error, report and close
-            //    - otherwise, continue
-            //  - if POLLERR or POLLHUP, close
+fn react_to_clients(ready_clients: Vec<(RawFd, PollFlags)>, fd2conn: &mut HashMap<RawFd, Conn>) {
+    ready_clients
+        .into_iter()
+        .flat_map(|(fd, revents)| {
+            let mut actions = Vec::new();
 
             if revents.contains(PollFlags::POLLIN) {
-                match conn.try_read() {
-                    Ok(0) => {
-                        // Peer closed the connection cleanly (EOF)
-                        close_connection = true;
-                    }
-                    Ok(_) => {}
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        // False alarm from OS, ignore
-                    }
-                    Err(e) => {
-                        eprintln!("Read error on fd {}: {}", fd, e);
-                        close_connection = true;
-                    }
-                }
+                actions.push((fd, REAction::TryRead))
             }
 
-            if !close_connection && revents.contains(PollFlags::POLLOUT) {
-                match conn.try_write() {
-                    Ok(_) => {}
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        // Kernel buffer full, ignore
-                    }
-                    Err(e) => {
-                        eprintln!("Write error on fd {}: {}", fd, e);
-                        close_connection = true;
-                    }
-                }
+            if revents.contains(PollFlags::POLLOUT) {
+                actions.push((fd, REAction::TryWrite))
             }
 
-            // If POLLERR or POLLHUP occur, close
             if revents.intersects(PollFlags::POLLERR | PollFlags::POLLHUP) {
-                close_connection = true;
+                actions.push((fd, REAction::Close))
             }
 
-            if close_connection {
-                disconnected_clients.push(fd);
-            }
-        }
-    }
+            actions
+        })
+        .for_each(|(fd, action)| match action {
+            REAction::TryRead => try_read(fd, fd2conn),
+            REAction::TryWrite => try_write(fd, fd2conn),
+            REAction::Close => close(fd, fd2conn),
+        })
+}
 
-    // Clean up closed connections
-    for fd in disconnected_clients {
-        println!("Client disconnected! (fd: {})", fd);
-        fd2conn.remove(&fd);
+fn try_read(fd: i32, fd2conn: &mut HashMap<RawFd, Conn>) {
+    let should_close = match fd2conn.get_mut(&fd) {
+        Some(conn) => match conn.try_read() {
+            Ok(0) => true,
+            Ok(_) => false,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => false,
+            Err(e) => {
+                eprintln!("Read error on fd {}: {}", fd, e);
+                true
+            }
+        },
+        None => false,
+    };
+    if should_close {
+        close(fd, fd2conn);
     }
+}
+
+fn try_write(fd: i32, fd2conn: &mut HashMap<RawFd, Conn>) {
+    let should_close = match fd2conn.get_mut(&fd) {
+        Some(conn) => match conn.try_write() {
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => false,
+            Err(e) => {
+                eprintln!("Write error on fd {}: {}", fd, e);
+                true
+            }
+            _ => false,
+        },
+        None => false,
+    };
+    if should_close {
+        close(fd, fd2conn);
+    }
+}
+
+fn close(fd: i32, fd2conn: &mut HashMap<RawFd, Conn>) {
+    println!("Client disconnected! (fd: {})", fd);
+    fd2conn.remove(&fd);
 }

@@ -1,10 +1,7 @@
 # Connection Lifecycle and Core Concepts
 
-**Audience**: Learners exploring systems programming and network protocols.
-**Prerequisites**: None.
-**Status**: Reviewed
-
 ## Overview
+
 This document explains the foundational abstractions of a TCP connection: how the OS represents it, how your application references it, and the typical lifecycle of establishing, communicating, and closing a socket.
 
 ---
@@ -12,6 +9,7 @@ This document explains the foundational abstractions of a TCP connection: how th
 ## Part 1: The Core Picture
 
 ### 1. The Kernel, The Handle, and The Wrapper
+
 To work with network connections, you deal with three layers of abstraction:
 
 - **Socket (kernel)**: The OS's internal object that holds the protocol state (addresses, ports, TCP state machine, buffers). It lives entirely in kernel memory.
