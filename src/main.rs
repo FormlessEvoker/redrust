@@ -1,3 +1,5 @@
+//! Single-threaded non-blocking TCP echo server built around `poll(2)`.
+
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use std::collections::HashMap;
 use std::error::Error;
@@ -10,6 +12,7 @@ mod conn;
 
 use crate::conn::Conn;
 
+/// Starts the listener and runs the central poll-driven event loop forever.
 fn main() -> Result<(), Box<dyn Error>> {
     let cfg = config::load_env()?;
     let addr = format!("0.0.0.0:{}", cfg.port);
@@ -45,7 +48,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         // poll flags returned from the OS
         let ready_clients: Vec<(RawFd, PollFlags)> = poll_args
             .iter()
+            // First item is the listener, not the clients
             .skip(1)
+            // Get file descriptors that actually have poll
             .filter_map(|pfd| {
                 pfd.revents()
                     .filter(|r| !r.is_empty())
@@ -67,9 +72,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-// Given the listener and the connection map,
-// build a list of poll file descriptors, which are the fds which we are listening
-// to OS events for sockets that
+/// Builds the list of file descriptors that `poll` should watch this iteration.
+///
+/// The first entry is always the listening socket. Each active connection adds
+/// one entry whose flags are derived from that connection's current read/write intent.
 fn build_poll_args<'sock>(
     listener: &'sock TcpListener,
     fd2conn: &'sock HashMap<RawFd, Conn>,
@@ -96,6 +102,10 @@ fn build_poll_args<'sock>(
     poll_args
 }
 
+/// Accepts every client currently queued on the listening socket.
+///
+/// Because the listener is non-blocking, `WouldBlock` means we have drained the
+/// kernel's pending-accept queue for now.
 fn accept_new_clients(listener: &TcpListener, fd2conn: &mut HashMap<RawFd, Conn>) {
     loop {
         match listener.accept() {
@@ -119,14 +129,17 @@ fn accept_new_clients(listener: &TcpListener, fd2conn: &mut HashMap<RawFd, Conn>
     }
 }
 
-// Stands for REvent action
-// as in an action to take for specific REvent...
-// or our "reaction" to it... lol
+/// Describes whether a connection should stay registered after one I/O attempt.
 enum PostIOState {
     KeepAlive,
     Close,
 }
 
+/// Handles the readiness flags returned by `poll` for each active client.
+///
+/// Structural mutation of the connection map stays here so helpers can borrow
+/// one connection, return a semantic outcome, and let this function remove the
+/// entry only after that borrow has ended.
 fn react_to_clients(ready_clients: Vec<(RawFd, PollFlags)>, fd2conn: &mut HashMap<RawFd, Conn>) {
     for (fd, revents) in ready_clients {
         if revents.contains(PollFlags::POLLIN) {
@@ -155,6 +168,10 @@ fn react_to_clients(ready_clients: Vec<(RawFd, PollFlags)>, fd2conn: &mut HashMa
     }
 }
 
+/// Attempts one non-blocking read on the selected connection.
+///
+/// EOF and hard read errors request closure. `WouldBlock` means the socket is
+/// still alive and should remain in the connection map.
 fn try_read(fd: i32, fd2conn: &mut HashMap<RawFd, Conn>) -> PostIOState {
     match fd2conn.get_mut(&fd) {
         Some(conn) => match conn.try_read() {
@@ -170,6 +187,9 @@ fn try_read(fd: i32, fd2conn: &mut HashMap<RawFd, Conn>) -> PostIOState {
     }
 }
 
+/// Attempts one non-blocking write on the selected connection.
+///
+/// Write errors other than `WouldBlock` are treated as fatal for that client.
 fn try_write(fd: i32, fd2conn: &mut HashMap<RawFd, Conn>) -> PostIOState {
     match fd2conn.get_mut(&fd) {
         Some(conn) => match conn.try_write() {
@@ -184,6 +204,9 @@ fn try_write(fd: i32, fd2conn: &mut HashMap<RawFd, Conn>) -> PostIOState {
     }
 }
 
+/// Removes the connection from the server's registry.
+///
+/// Dropping the `Conn` closes the underlying socket.
 fn close(fd: i32, fd2conn: &mut HashMap<RawFd, Conn>) {
     println!("Client disconnected! (fd: {})", fd);
     fd2conn.remove(&fd);

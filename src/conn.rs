@@ -1,19 +1,26 @@
+//! Per-connection state and non-blocking read/write helpers.
+
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
+/// Tracks one client socket plus the buffers and poll interests associated with it.
 pub struct Conn {
+    /// The live TCP stream for this client.
     pub stream: TcpStream,
 
-    // Intention for OS poll
+    /// Whether the event loop should ask the OS for read readiness on this socket.
     pub want_read: bool,
+    /// Whether the event loop should ask the OS for write readiness on this socket.
     pub want_write: bool,
 
-    // Application buffers
+    /// Bytes received from the client that the application has buffered.
     pub incoming: Vec<u8>,
+    /// Bytes queued to be written back to the client.
     pub outgoing: Vec<u8>,
 }
 
 impl Conn {
+    /// Creates a new connection in "read first request" mode.
     pub fn new(stream: TcpStream) -> Self {
         Self {
             stream,
@@ -24,6 +31,7 @@ impl Conn {
         }
     }
 
+    /// Attempts a single non-blocking read and updates buffers plus poll intent.
     pub fn try_read(&mut self) -> std::io::Result<usize> {
         let mut buf = [0u8; 4096];
         match self.stream.read(&mut buf) {
@@ -43,6 +51,7 @@ impl Conn {
         }
     }
 
+    /// Attempts a single non-blocking write from the outgoing buffer.
     pub fn try_write(&mut self) -> std::io::Result<usize> {
         if self.outgoing.is_empty() {
             self.want_read = true;
@@ -70,6 +79,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
 
+    // Builds a connected client/server socket pair for focused `Conn` tests.
     fn setup_test_connection() -> (Conn, TcpStream) {
         // Bind to a random port on localhost
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -96,6 +106,7 @@ mod tests {
         assert!(conn.outgoing.is_empty());
     }
 
+    // Retries until the non-blocking server side has data ready to read.
     fn wait_for_read(conn: &mut Conn) -> usize {
         loop {
             match conn.try_read() {
