@@ -7,6 +7,7 @@ High-level network, OS, and Rust concepts.
 - [Connection Lifecycle & Core Concepts](foundations/connection_lifecycle.md): Explains sockets, file descriptors, `TcpStream`, and how they map together.
 - [Kernel Socket Mechanics & Polling](foundations/kernel_socket_mechanics.md): Deep dive into kernel receive/send buffers, hardware interrupts, how `poll()` actually works, and the anatomy of a TCP EOF.
 - [Poll Flags: The Event Loop Vocabulary](foundations/poll_flags.md): Explains the input and output flags (`POLLIN`, `POLLOUT`, `POLLHUP`, etc.) used in the `poll()` system call.
+- [Stream Buffers, Framing, and Pipelining](foundations/stream_buffers_and_pipelining.md): Explains why TCP is a byte stream, how `Conn` buffers and parses requests, and how pipelining changes the event loop design.
 - [TCP State Machine](foundations/tcp_state_machine.md): Visual map of the connection lifecycle states (`LISTEN`, `ESTABLISHED`, `TIME_WAIT`, etc.) and what they mean.
 
 ## ⚙️ Implementation
