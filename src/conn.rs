@@ -1,5 +1,6 @@
 //! Per-connection state and non-blocking read/write helpers.
 
+use std::io;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
@@ -12,6 +13,8 @@ pub struct Conn {
     pub want_read: bool,
     /// Whether the event loop should ask the OS for write readiness on this socket.
     pub want_write: bool,
+    /// Whether the peer has closed their side of the connection
+    pub peer_closed: bool,
 
     /// Bytes received from the client that the application has buffered.
     pub incoming: Vec<u8>,
@@ -24,32 +27,50 @@ impl Conn {
     pub fn new(stream: TcpStream) -> Self {
         Self {
             stream,
-            want_read: true, // always read first request
-            want_write: false,
+            want_read: true,   // always read first request
+            want_write: false, // nothing to write on start
+            peer_closed: false,
             incoming: Vec::new(),
             outgoing: Vec::new(),
         }
     }
 
-    /// Attempts a single non-blocking read and updates buffers plus poll intent.
-    pub fn try_read(&mut self) -> std::io::Result<usize> {
+    /// Reads from the socket until EOF, error, or WouldBlock
+    /// Puts all read bytes into `incoming` buffer
+    pub fn try_read(&mut self) -> io::Result<()> {
         let mut buf = [0u8; 4096];
-        match self.stream.read(&mut buf) {
-            Ok(0) => {
-                // Connection closed
-                Ok(0)
+
+        loop {
+            match self.stream.read(&mut buf) {
+                Ok(0) => {
+                    // Connection closed
+                    self.peer_closed = true;
+
+                    // There could still be data in the buffers
+                    // Return because there's nothing to read
+                    // let the caller deal with flushing the remaining data
+                    return Ok({});
+                }
+                Ok(n) => {
+                    // Append data to the buffer
+                    self.incoming.extend_from_slice(&buf[..n]);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    return Ok({});
+                }
+                Err(e) => return Err(e),
             }
-            Ok(n) => {
-                self.incoming.extend_from_slice(&buf[..n]);
-                // For now, let's just echo it back directly for testing
-                self.outgoing.extend_from_slice(&buf[..n]);
-                self.want_read = false;
-                self.want_write = true;
-                Ok(n)
-            }
-            Err(e) => Err(e),
         }
     }
+
+    // TODO: add a try_parse_one_request function which attempts to parse a request from the incoming buffer.
+    //  - If not a full request, just returns empty
+    //  - If there's a full request, return it and also the length of it
+
+    // TODO: add a function `truncate_front` or similar which allows us to essentially remove the front N bytes of the incoming vector
+    // This will be used after repeated `try_parse_one_request` calls so that we can drop the bytes that have already been read ONCE at the end
+
+    // TODO: Add a `queue_response` or similar function which appends data into the outgoing buffer
 
     /// Attempts a single non-blocking write from the outgoing buffer.
     pub fn try_write(&mut self) -> std::io::Result<usize> {
@@ -70,6 +91,10 @@ impl Conn {
             }
             Err(e) => Err(e),
         }
+    }
+
+    pub fn ready_for_close(&self) -> bool {
+        self.peer_closed && self.incoming.is_empty() && self.outgoing.is_empty()
     }
 }
 
@@ -107,10 +132,10 @@ mod tests {
     }
 
     // Retries until the non-blocking server side has data ready to read.
-    fn wait_for_read(conn: &mut Conn) -> usize {
+    fn wait_for_read(conn: &mut Conn) -> () {
         loop {
             match conn.try_read() {
-                Ok(n) => return n,
+                Ok(()) => (),
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
@@ -136,8 +161,7 @@ mod tests {
         client.write_all(b"ping").unwrap();
 
         // Server reads it without blocking
-        let n = wait_for_read(&mut conn);
-        assert_eq!(n, 4);
+        wait_for_read(&mut conn);
         assert_eq!(conn.incoming, b"ping");
         assert_eq!(conn.outgoing, b"ping"); // Echo server logic
 
@@ -167,8 +191,8 @@ mod tests {
         // Dropping the client drops the socket (sends EOF/FIN to the server)
         drop(client);
 
-        // try_read should cleanly return Ok(0)
-        let n = wait_for_read(&mut conn);
-        assert_eq!(n, 0);
+        // try_read should cleanly return Ok(())
+        let res = wait_for_read(&mut conn);
+        assert_eq!(res, ());
     }
 }

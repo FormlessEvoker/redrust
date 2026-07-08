@@ -172,11 +172,16 @@ fn react_to_clients(ready_clients: Vec<(RawFd, PollFlags)>, fd2conn: &mut HashMa
 ///
 /// EOF and hard read errors request closure. `WouldBlock` means the socket is
 /// still alive and should remain in the connection map.
+// TODO: this will change and it need to read as much as possible, then iterate through each request, handle it, etc
+// The loop will be something like this:
+//  - use conn.try_read to read from socket until there's nothing left to read
+//  - loop try_parse_one_request to get a list of requests
+//  - using the sum of the request lengths, truncate the incoming vector on conn
+//  - call a `handle_request` function which just echoes the request into the outgoing vector on conn for now
 fn try_read(fd: i32, fd2conn: &mut HashMap<RawFd, Conn>) -> PostIOState {
     match fd2conn.get_mut(&fd) {
         Some(conn) => match conn.try_read() {
-            Ok(0) => PostIOState::Close,
-            Ok(_) => PostIOState::KeepAlive,
+            Ok(()) => PostIOState::KeepAlive,
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => PostIOState::KeepAlive,
             Err(e) => {
                 eprintln!("Read error on fd {}: {}", fd, e);
