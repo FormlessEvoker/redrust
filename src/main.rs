@@ -7,6 +7,7 @@ use std::io;
 use std::net::TcpListener;
 use std::os::fd::{AsFd, AsRawFd, RawFd};
 
+mod buffer;
 mod config;
 mod conn;
 
@@ -216,3 +217,34 @@ fn close(fd: i32, fd2conn: &mut HashMap<RawFd, Conn>) {
     println!("Client disconnected! (fd: {})", fd);
     fd2conn.remove(&fd);
 }
+
+// #[test]
+// fn test_try_read_and_echo() {
+//     let (mut conn, mut client) = setup_test_connection();
+
+//     // Client writes data to server
+//     client.write_all(b"ping").unwrap();
+
+//     // Server reads it without blocking
+//     wait_for_read(&mut conn);
+//     assert_eq!(conn.incoming, b"ping");
+//     assert_eq!(conn.outgoing, b"ping"); // Echo server logic
+
+//     // Intent flags should flip to allow write polling
+//     assert!(!conn.want_read);
+//     assert!(conn.want_write);
+
+//     // Server flushed write buffer to client
+//     let n = conn.try_write().unwrap();
+//     assert_eq!(n, 4);
+//     assert!(conn.outgoing.is_empty());
+
+//     // Intent flags flip back
+//     assert!(conn.want_read);
+//     assert!(!conn.want_write);
+
+//     // Verify client received the echo
+//     let mut buf = [0u8; 4];
+//     client.read_exact(&mut buf).unwrap();
+//     assert_eq!(&buf, b"ping");
+// }
