@@ -1,112 +1,71 @@
-# `Conn` — connection implementation and event-loop integration
+# `Conn` — Per-Connection State
 
-This document explains the `Conn` struct in this repository, what each field means, how `try_read()` / `try_write()` behave, and how `Conn` is intended to be used from an event loop.
+`Conn` owns one non-blocking `TcpStream` and the application state needed to
+process it. The event loop owns the connection registry; `Conn` owns socket
+I/O, request buffering, response buffering, and read/write interest flags.
 
-See the implementation in the code: [src/conn.rs](src/conn.rs)
+## State
 
-## Overview
+- `stream` is the non-blocking TCP socket.
+- `incoming` stores bytes read from the socket but not yet parsed.
+- `outgoing` stores response bytes waiting to be written.
+- `want_read` and `want_write` are translated into `poll(2)` interests by
+  `build_poll_args`.
+- `peer_closed` records EOF or a peer hangup. It does not immediately close the
+  connection because buffered requests and responses still need to drain.
 
-- `Conn` represents a single connected TCP endpoint. It owns a `TcpStream` and maintains application-level buffers and intent flags used by a poll-driven event loop.
+Both byte buffers use [`Buffer`](../../src/buffer.rs), which advances a logical
+read position and compacts only when needed.
 
-## Fields explained
+## Request Processing
 
-- `stream: TcpStream` — the Rust handle that wraps the OS socket. Use `stream.set_nonblocking(true)` in the server to avoid blocking reads/writes.
-- `want_read: bool` — whether the application wants to receive readable notifications for the socket.
-- `want_write: bool` — whether the application wants writable notifications for the socket.
-- `incoming: Vec<u8>` — bytes read from the socket and not yet processed by the application.
-- `outgoing: Vec<u8>` — bytes the application wants to send to the peer; `try_write()` flushes these.
+The current learning protocol is a four-byte big-endian length followed by the
+payload:
 
-## Methods and semantics
-
-### `new(stream: TcpStream)`
-- Constructs a new `Conn`. By default `want_read = true` so a newly-accepted connection begins by reading the client's request.
-
-### `try_read(&mut self) -> std::io::Result<usize>`
-- Attempts to read up to a fixed-size buffer from the socket and appends bytes to `incoming`.
-- `Ok(n)` with `n > 0`: `n` bytes were read. The example `Conn` echoes those bytes to `outgoing` for testing.
-- `Ok(0)`: peer performed an orderly shutdown (EOF / FIN).
-- `Err(e)`:
-  - If `e.kind() == std::io::ErrorKind::WouldBlock`, no data is available on a non-blocking socket — wait for the next readable event.
-  - Other `Err` values represent real I/O errors and typically require closing the connection or logging/handling the error.
-- Side effects: sets `want_read`/`want_write` to guide the poller (the example flips to write when it has data to send).
-
-### `try_write(&mut self) -> std::io::Result<usize>`
-- Attempts to write as many bytes as the OS will accept from `outgoing`.
-- `Ok(n)`: `n` bytes written; `outgoing.drain(..n)` removes those bytes from the buffer.
-- If `outgoing` becomes empty, `want_write` is cleared and `want_read` is typically re-enabled.
-- `Err(e)`:
-  - `WouldBlock` indicates the socket's send buffer is full — wait for a writable event.
-  - Other errors are fatal for the connection.
-
-## Event loop integration (pseudo-code)
-
-The `want_read` / `want_write` flags express interest to the OS poller (e.g., `mio`, `poll`, `epoll`). The poller should register or reregister the socket with the appropriate interest mask based on those flags.
-
-Example loop pseudocode:
-
-```rust
-loop {
-    // Build interest set from Conn.want_read/want_write
-    poll.poll(&mut events, timeout)?;
-    for event in events.iter() {
-        let conn = conn_for_event(event);
-        if event.is_readable() && conn.want_read {
-            match conn.try_read() {
-                Ok(0) => close(conn),
-                Ok(_) => reregister(conn),
-                Err(e) if e.kind() == WouldBlock => (),
-                Err(_) => close(conn),
-            }
-        }
-        if event.is_writable() && conn.want_write {
-            match conn.try_write() {
-                Ok(_) => reregister(conn),
-                Err(e) if e.kind() == WouldBlock => (),
-                Err(_) => close(conn),
-            }
-        }
-    }
-}
+```text
+00 00 00 05  hello
 ```
 
-Notes:
-- Always reregister interest with the poller after changing `want_read` / `want_write`.
-- Don't busy-loop on `WouldBlock`: rely on the OS to notify when the socket becomes readable/writable.
+`try_read` drains the non-blocking socket until it reaches `WouldBlock` or EOF;
+the `WouldBlock` condition is handled internally as a successful no-more-data
+result.
+`try_parse_one_request` then consumes exactly one complete frame. If the header
+or payload is incomplete, it returns `None` and leaves the input untouched.
 
-## Partial writes and buffering
+The event loop repeats parsing while complete requests are available:
 
-TCP `write()` calls are allowed to write fewer bytes than requested. `Conn::try_write()` drains the prefix of `outgoing` that was written — leaving the remainder for the next writable event. This is the correct behavior for non-blocking I/O.
-
-## Tests and behavior in this repo
-
-See the unit tests in [`src/conn.rs`](src/conn.rs#L1) which create a loopback connection and exercise the read/echo/write behavior. The tests illustrate non-blocking server socket behavior and the `Ok(0)` EOF case.
-
-## Observing OS-level socket state (`getsockopt`, `TCP_INFO`)
-
-If you want to inspect kernel TCP state (retransmits, RTT, state) programmatically, Linux exposes `TCP_INFO` via `getsockopt`. Example using the `socket2` crate and `libc` on Linux:
-
-```rust
-// Cargo.toml: socket2 = "0.4"
-use socket2::{Socket, TcpKeepalive};
-use std::os::unix::io::AsRawFd;
-
-let sock = Socket::from(stream.try_clone().unwrap());
-let fd = sock.as_raw_fd();
-
-// On Linux you can call getsockopt with TCP_INFO (requires libc bindings):
-// unsafe { libc::getsockopt(fd, libc::IPPROTO_TCP, libc::TCP_INFO, &mut info as *mut _ as *mut _, &mut len) };
+```text
+read bytes -> parse request -> queue response -> repeat
 ```
 
-Notes:
-- `TCP_INFO` is Linux-specific and returns a `tcp_info` struct with internal TCP metrics.
-- On macOS/BSD, there is no direct `TCP_INFO` equivalent; use `netstat`, `ss`, or system tracing (DTrace) to observe details.
-- Using raw `getsockopt` requires unsafe code and platform-specific `libc` structs; prefer a crate that wraps these if available.
+This handles both a request split across multiple reads and multiple pipelined
+requests received in one read.
 
-## Further reading and next steps
+## Output and Backpressure
 
-- `src/conn.rs` is intentionally small and focused; consider expanding docs to show full lifecycle with parser integration (RESP parsing) and backpressure handling.
-- Add a short example that demonstrates toggling `want_read`/`want_write` with `mio` or `poll` (I can add an example file if you'd like).
+`queue_response` appends bytes in request order and enables write readiness.
+`try_write` may write only part of the queue, so it consumes only the bytes
+accepted by the socket and leaves the remainder for a later `POLLOUT` event.
 
----
+The outgoing buffer has high and low watermarks:
 
-File: `docs/implementation/conn.md`
+- At the high watermark, request parsing and `POLLIN` interest are paused.
+- Once writing drains the queue to the low watermark, reading is resumed.
+
+This prevents a fast pipelining client from making the server queue output
+without bound. The current limits are intentionally fixed constants in
+`conn.rs`; configuration and hard request-size limits are future work.
+
+## Connection Shutdown
+
+TCP half-close means the peer has closed its write direction, so the server
+observes EOF while it may still need to write a response. The server therefore
+marks `peer_closed`, preserves both buffers, and removes the connection only
+when `ready_for_close` reports that incoming and outgoing data are empty.
+
+## Related Tests
+
+- Unit tests for buffer and connection behavior are in
+  [`src/buffer.rs`](../../src/buffer.rs) and [`src/conn.rs`](../../src/conn.rs).
+- End-to-end tests cover multiple clients, pipelined requests, and a request
+  spanning multiple read iterations in [`tests/server_echo.rs`](../../tests/server_echo.rs).
