@@ -51,25 +51,27 @@ Failure mode:
 - client reads too slowly
 - `outgoing` grows without bound
 
-Possible future policy:
+Current policy:
 
 ```rust
 const MAX_OUTGOING_BYTES: usize = 1 << 20; // example only
 
-if conn.outgoing.len() > MAX_OUTGOING_BYTES {
-    conn.want_read = false; // temporary backpressure
-}
+// Conn pauses request parsing at a high watermark and resumes below a low
+// watermark.
 ```
 
-Implementation directions:
+Implemented behavior:
 
-- stop reading when `outgoing` crosses a high-water mark
-- resume reading when it drops below a low-water mark
-- close the connection if buffered output becomes unreasonable
+- `Conn::queue_response` disables further read interest at the high watermark
+- `Conn::try_write` resumes read interest at the low watermark
+- parsing checks the watermark between pipelined requests
+
+Still deferred is a configurable or hard maximum that would reject or close a
+connection whose single response exceeds the high watermark.
 
 ## 3. Add Backpressure Instead of Always Reading
 
-The simple model is:
+The original simple model was:
 
 - readable event -> read until `WouldBlock`
 - parse all complete requests
@@ -77,13 +79,14 @@ The simple model is:
 
 That is correct for learning, but not always desirable in a real system.
 
-Future refinement:
+The current implementation refines this by:
 
-- keep `want_read = true` only while the connection is healthy and buffered work is within limits
-- temporarily disable reads when:
-  - `outgoing` is too large
-  - total in-flight work for the connection is too large
-  - the server wants fairness across many clients
+- keeping `want_read = true` only while buffered output is below the high
+  watermark
+- re-enabling reads after output drains to the low watermark
+
+Still deferred are total in-flight request limits and fairness limits across
+many clients.
 
 This turns `want_read` and `want_write` into flow-control tools, not just event-loop toggles.
 
@@ -191,11 +194,9 @@ Per-connection limits are the first step. Global limits are the next step when o
 When the current implementation is stable, a reasonable follow-up order is:
 
 1. add parser/request-size limits
-2. add `incoming` and `outgoing` high-water marks
-3. add read backpressure based on buffered output
-4. improve FIFO buffer representation
-5. add fairness caps per loop iteration
-6. add global memory and connection limits
+2. improve FIFO buffer representation
+3. add fairness caps per loop iteration
+4. add global memory and connection limits
 
 ## Non-Goals for Now
 

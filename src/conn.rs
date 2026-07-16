@@ -9,6 +9,9 @@ use std::net::TcpStream;
 
 use crate::buffer::Buffer;
 
+const DEFAULT_HIGH_WATERMARK: usize = 64 * 1024;
+const DEFAULT_LOW_WATERMARK: usize = 32 * 1024;
+
 #[derive(Debug)]
 /// Tracks one client socket plus the buffers and poll interests associated with it.
 pub struct Conn {
@@ -26,6 +29,9 @@ pub struct Conn {
     pub incoming: Buffer,
     /// Bytes queued to be written back to the client.
     pub outgoing: Buffer,
+
+    high_watermark: usize,
+    low_watermark: usize,
 }
 
 impl Conn {
@@ -41,6 +47,22 @@ impl Conn {
             peer_closed: false,
             incoming: Buffer::new(),
             outgoing: Buffer::new(),
+            high_watermark: DEFAULT_HIGH_WATERMARK,
+            low_watermark: DEFAULT_LOW_WATERMARK,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_watermarks(stream: TcpStream, high: usize, low: usize) -> Self {
+        Self {
+            stream,
+            want_read: true,   // always read first request
+            want_write: false, // nothing to write on start
+            peer_closed: false,
+            incoming: Buffer::new(),
+            outgoing: Buffer::new(),
+            high_watermark: high,
+            low_watermark: low,
         }
     }
 
@@ -74,9 +96,21 @@ impl Conn {
         }
     }
 
+    /// Reads the four-byte big-endian payload length from the buffer head.
+    ///
+    /// Returns `None` when fewer than four bytes are available. The buffer is
+    /// not modified.
     fn parse_request_length(buf: &Buffer) -> Option<usize> {
         let header: [u8; 4] = buf.as_slice().get(..4)?.try_into().ok()?;
-        return Some(u32::from_be_bytes(header) as usize);
+        Some(u32::from_be_bytes(header) as usize)
+    }
+
+    /// Returns whether parsing another complete request is allowed.
+    ///
+    /// Request parsing pauses when queued output reaches the high watermark.
+    /// Writing output below the low watermark re-enables reading.
+    pub fn can_process_requests(&self) -> bool {
+        self.outgoing.len() < self.high_watermark
     }
 
     /// Attempts to extract one complete length-prefixed request.
@@ -87,10 +121,10 @@ impl Conn {
     pub fn try_parse_one_request(&mut self) -> Option<Vec<u8>> {
         if self.incoming.len() < 4 {
             return None;
-        };
+        }
 
         // TODO: eventually, we may want to account for potential malformed request length headers
-        let len = Self::parse_request_length(&mut self.incoming)?;
+        let len = Self::parse_request_length(&self.incoming)?;
         let len_with_header = 4usize.checked_add(len)?;
 
         // Check to ensure that full message exists and can be read
@@ -105,7 +139,11 @@ impl Conn {
     /// Appends a response to the outgoing queue and requests write readiness.
     pub fn queue_response(&mut self, data: Vec<u8>) {
         self.outgoing.append(data.as_slice());
-        self.want_write = true
+
+        if self.outgoing.len() >= self.high_watermark {
+            self.want_read = false;
+        }
+        self.want_write = true;
     }
 
     /// Attempts one non-blocking write from the outgoing buffer.
@@ -123,10 +161,15 @@ impl Conn {
         match self.stream.write(&self.outgoing.as_slice()) {
             Ok(n) => {
                 self.outgoing.consume(n);
+
                 if self.outgoing.is_empty() {
                     self.want_write = false;
+                }
+
+                if self.outgoing.len() <= self.low_watermark {
                     self.want_read = true;
                 }
+
                 Ok(())
             }
             Err(e) => Err(e),
@@ -165,6 +208,21 @@ mod tests {
         client_stream.set_nonblocking(false).unwrap(); // Client can block to make tests easier
 
         (Conn::new(server_stream), client_stream)
+    }
+
+    fn setup_test_connection_with_watermarks(high: usize, low: usize) -> (Conn, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client_stream = TcpStream::connect(addr).unwrap();
+        let (server_stream, _) = listener.accept().unwrap();
+
+        server_stream.set_nonblocking(true).unwrap();
+        client_stream.set_nonblocking(false).unwrap();
+
+        (
+            Conn::with_watermarks(server_stream, high, low),
+            client_stream,
+        )
     }
 
     fn wait_until_incoming_len(conn: &mut Conn, expected_len: usize) {
@@ -287,6 +345,54 @@ mod tests {
     }
 
     #[test]
+    fn test_queue_response_keeps_reading_below_high_watermark() {
+        let (mut conn, _) = setup_test_connection_with_watermarks(8, 4);
+
+        conn.queue_response(b"1234".to_vec());
+
+        assert!(conn.want_read);
+        assert!(conn.want_write);
+        assert_eq!(conn.outgoing.len(), 4);
+    }
+
+    #[test]
+    fn test_queue_response_disables_reading_at_high_watermark() {
+        let (mut conn, _) = setup_test_connection_with_watermarks(8, 4);
+
+        conn.queue_response(b"12345678".to_vec());
+
+        assert!(!conn.want_read);
+        assert!(conn.want_write);
+        assert_eq!(conn.outgoing.len(), 8);
+    }
+
+    #[test]
+    fn test_try_write_resumes_reading_at_or_below_low_watermark() {
+        let (mut conn, mut client) = setup_test_connection_with_watermarks(8, 4);
+        conn.queue_response(b"12345678".to_vec());
+        assert!(!conn.want_read);
+
+        conn.try_write().unwrap();
+
+        let mut response = [0; 8];
+        client.read_exact(&mut response).unwrap();
+        assert_eq!(&response, b"12345678");
+        assert!(conn.want_read);
+        assert!(!conn.want_write);
+        assert!(conn.outgoing.is_empty());
+    }
+
+    #[test]
+    fn test_default_watermarks_disable_reading_for_large_queued_response() {
+        let (mut conn, _) = setup_test_connection();
+
+        conn.queue_response(vec![0; DEFAULT_HIGH_WATERMARK]);
+
+        assert!(!conn.want_read);
+        assert!(conn.want_write);
+    }
+
+    #[test]
     fn test_try_write_flushes_response_and_restores_read_mode() {
         let (mut conn, mut client) = setup_test_connection();
         conn.queue_response(b"pong".to_vec());
@@ -311,6 +417,28 @@ mod tests {
 
         assert!(conn.want_read);
         assert!(!conn.want_write);
+    }
+
+    #[test]
+    fn test_repeated_responses_do_not_grow_outgoing_storage_without_bound() {
+        let (mut conn, mut client) = setup_test_connection();
+        let response = b"pong".to_vec();
+
+        for _ in 0..1024 {
+            conn.queue_response(response.clone());
+            conn.try_write().unwrap();
+
+            let mut received = [0; 4];
+            client.read_exact(&mut received).unwrap();
+            assert_eq!(&received, b"pong");
+        }
+
+        assert!(conn.outgoing.is_empty());
+        assert!(
+            conn.outgoing.allocated_capacity() <= 64,
+            "outgoing capacity grew to {} bytes",
+            conn.outgoing.allocated_capacity()
+        );
     }
 
     #[test]

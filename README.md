@@ -7,7 +7,7 @@ This project is a personal learning exercise to implement the ideas from the boo
 ## Documentation
 
 - Foundations (conceptual): foundational networking and OS concepts, diagrams, and tutorials are available in `docs/foundations/`. See the Documentation Index: [docs/README.md](docs/README.md).
-- Implementation (project-specific): design notes, API docs, and implementation rationale live in `docs/implementation/` (stub to start): [docs/implementation/README.md](docs/implementation/README.md).
+- Implementation (project-specific): design notes, API docs, and implementation rationale live in `docs/implementation/`: [docs/implementation/README.md](docs/implementation/README.md).
 
 ## About tooling
 
@@ -22,4 +22,3 @@ This repository is not intended as production-ready software. It is an education
 ---
 
 For more, see the full documentation index: [docs/README.md](docs/README.md).
-

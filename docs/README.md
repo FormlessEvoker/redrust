@@ -12,7 +12,9 @@ High-level network, OS, and Rust concepts.
 
 ## ⚙️ Implementation
 Details on the specific architectural choices in RedRust.
-*(More docs coming soon)*
+- [`Conn` and connection handling](implementation/conn.md)
+- [`Why nix`](implementation/why_nix.md)
+- [`Pipelining and buffering hardening`](implementation/pipelining_future_hardening.md)
 
 ## 💡 Examples
 Code examples and tutorials.

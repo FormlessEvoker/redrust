@@ -29,7 +29,18 @@ impl Buffer {
     }
 
     /// Appends bytes to the end of the buffer.
+    ///
+    /// Appending does not move unread bytes unless the existing tail space is
+    /// insufficient. In that case, consumed bytes are compacted first.
     pub fn append(&mut self, data: &[u8]) {
+        // If there's read data in the buffer and not enough allocated
+        // space after the unread data, then compact
+        let tail_space: usize = self.data.capacity() - self.data.len();
+
+        if self.start > 0 && data.len() > tail_space {
+            self.compact()
+        }
+
         self.data.extend_from_slice(data)
     }
 
@@ -48,6 +59,9 @@ impl Buffer {
     }
 
     /// Returns all unread bytes as a borrowed slice without consuming them.
+    ///
+    /// The returned slice is invalidated by any subsequent mutable operation
+    /// on this buffer.
     pub fn as_slice(&self) -> &[u8] {
         &self.data[self.start..]
     }
@@ -62,10 +76,7 @@ impl Buffer {
         }
 
         let end: usize = self.start + len;
-
-        let Some(data) = self.data.get(self.start..end) else {
-            return None;
-        };
+        let data: &[u8] = self.data.get(self.start..end)?;
 
         // Advance start len bytes
         self.start += len;
@@ -83,6 +94,11 @@ impl Buffer {
         self.data.copy_within(self.start.., 0);
         self.data.truncate(rem);
         self.start = 0;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn allocated_capacity(&self) -> usize {
+        self.data.capacity()
     }
 }
 
